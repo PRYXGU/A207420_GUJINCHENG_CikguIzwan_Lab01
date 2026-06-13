@@ -29,10 +29,15 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import androidx.room.Entity
 import androidx.room.PrimaryKey
+import com.google.firebase.firestore.firestore
+import com.google.firebase.Firebase
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import androidx.compose.runtime.rememberCoroutineScope
 
 // 【技术点 1：数据模型】
 // 定义一个数据类，用于在不同界面之间传递和存储翻译或单词的信息
@@ -116,11 +121,13 @@ fun MainNavigation() {
     )
 
     NavHost(navController = navController, startDestination = "home") {
-        composable("home") { HomeScreen(navController, vm) }           // 界面 1：主页
-        composable("history") { HistoryScreen(navController, vm) }     // 界面 2：生词本/历史列表
-        composable("me") { MeScreen(navController, vm) }               // 界面 3：个人信息
-        composable("add_word") { AddWordScreen(navController, vm) }    // 界面 4：表单输入（Form Input）
-        composable("check_in") { CheckInScreen(navController, vm) }    // 界面 5：逻辑处理（Processing）
+        composable("home") { HomeScreen(navController, vm) }
+        composable("history") { HistoryScreen(navController, vm) }
+        composable("me") { MeScreen(navController, vm) }
+        composable("add_word") { AddWordScreen(navController, vm) }
+        composable("check_in") { CheckInScreen(navController, vm) }
+        composable("photo_translate") { PhotoTranslateScreen(navController, vm) }
+        composable("community") { CommunityScreen(navController) }
     }
 }
 
@@ -129,7 +136,9 @@ fun MainNavigation() {
 fun HomeScreen(navController: NavController, viewModel: TranssistantViewModel) {
     var inputQuery by remember { mutableStateOf("") }
     var displayMessage by remember { mutableStateOf("Waiting for input...") }
+    var isTranslating by remember { mutableStateOf(false) }
     var showMenu by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
 
     Box(modifier = Modifier.fillMaxSize()) {
         // 背景图片展示
@@ -146,14 +155,30 @@ fun HomeScreen(navController: NavController, viewModel: TranssistantViewModel) {
                 Column(modifier = Modifier.padding(16.dp)) {
                     TextField(value = inputQuery, onValueChange = { inputQuery = it }, placeholder = { Text("Enter text to translate...", color = Color.White.copy(alpha = 0.6f)) }, modifier = Modifier.fillMaxWidth(), colors = TextFieldDefaults.colors(focusedContainerColor = Color.Transparent, unfocusedContainerColor = Color.Transparent, focusedTextColor = Color.White, unfocusedTextColor = Color.White))
                     Spacer(modifier = Modifier.height(8.dp))
-                    Button(onClick = {
-                        if(inputQuery.isNotBlank()) {
-                            displayMessage = "Result: $inputQuery"
-                            // 调用 ViewModel 更新全局状态，数据会被共享到 History 页面
-                            viewModel.addHistory(inputQuery, displayMessage, "Translation")
-                        }
-                    }, colors = ButtonDefaults.buttonColors(containerColor = primaryLight.copy(alpha = 0.6f)), modifier = Modifier.align(Alignment.End)) {
-                        Text("Translate", color = Color.White)
+                    Button(
+                        onClick = {
+                            if (inputQuery.isNotBlank() && !isTranslating) {
+                                isTranslating = true
+                                displayMessage = "Translating..."
+                                scope.launch(Dispatchers.IO) {
+                                    val result = try {
+                                        RetrofitClient.api.translate(inputQuery).responseData.translatedText
+                                    } catch (e: Exception) {
+                                        "Translation failed: ${e.message}"
+                                    }
+                                    withContext(Dispatchers.Main) {
+                                        displayMessage = result
+                                        viewModel.addHistory(inputQuery, result, "Translation")
+                                        isTranslating = false
+                                    }
+                                }
+                            }
+                        },
+                        enabled = !isTranslating,
+                        colors = ButtonDefaults.buttonColors(containerColor = primaryLight.copy(alpha = 0.6f)),
+                        modifier = Modifier.align(Alignment.End)
+                    ) {
+                        Text(if (isTranslating) "..." else "Translate", color = Color.White)
                     }
                 }
             }
@@ -168,10 +193,10 @@ fun HomeScreen(navController: NavController, viewModel: TranssistantViewModel) {
 
             // 快捷功能图标区域：使用自定义组件 FeatureIcon 实现代码复用
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
-                FeatureIcon("📷", "PHOTO") {}
+                FeatureIcon("📷", "PHOTO") { navController.navigate("photo_translate") }
                 FeatureIcon("📝", "ADD WORD") { navController.navigate("add_word") }
                 FeatureIcon("📅", "SIGN IN") { navController.navigate("check_in") }
-                FeatureIcon("📓", "WORDS") {}
+                FeatureIcon("📓", "WORDS") { navController.navigate("community") }
 
                 // 下拉菜单展示：导航到历史页面
                 Box {
@@ -218,17 +243,41 @@ fun HistoryScreen(navController: NavController, viewModel: TranssistantViewModel
             // 这证明了数据已经在不同页面之间成功共享
             LazyColumn(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 items(historyList) { item ->
+                    var shareStatus by remember { mutableStateOf("") }
                     Card(colors = CardDefaults.cardColors(containerColor = cardBackgroundColor), shape = RoundedCornerShape(12.dp)) {
-                        Row(modifier = Modifier.fillMaxWidth().padding(15.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(item.original, color = Color.White, fontWeight = FontWeight.Bold)
-                                Text(item.result, color = Color.White.copy(alpha = 0.8f))
+                        Column(modifier = Modifier.fillMaxWidth().padding(15.dp)) {
+                            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(item.original, color = Color.White, fontWeight = FontWeight.Bold)
+                                    Text(item.result, color = Color.White.copy(alpha = 0.8f))
+                                }
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Text(item.type, color = primaryLight, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Text("✕", color = Color.White.copy(alpha = 0.7f), fontSize = 14.sp, modifier = Modifier.clickable { viewModel.deleteItem(item) })
+                                }
                             }
-                            // 标记数据类型（翻译、单词或签到记录）
+                            Spacer(modifier = Modifier.height(8.dp))
                             Row(verticalAlignment = Alignment.CenterVertically) {
-                                Text(item.type, color = primaryLight, fontSize = 12.sp, fontWeight = FontWeight.Bold)
-                                Spacer(modifier = Modifier.width(8.dp))
-                                Text("✕", color = Color.White.copy(alpha = 0.7f), fontSize = 14.sp, modifier = Modifier.clickable { viewModel.deleteItem(item) })
+                                TextButton(
+                                    onClick = {
+                                        val entry = hashMapOf(
+                                            "word" to item.original,
+                                            "meaning" to item.result,
+                                            "author" to "A207420",
+                                            "timestamp" to System.currentTimeMillis()
+                                        )
+                                        Firebase.firestore.collection("community").add(entry)
+                                            .addOnSuccessListener { shareStatus = "Shared!" }
+                                            .addOnFailureListener { shareStatus = "Failed" }
+                                    },
+                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                                ) {
+                                    Text("🌐 Share", color = Color.White.copy(alpha = 0.8f), fontSize = 12.sp)
+                                }
+                                if (shareStatus.isNotBlank()) {
+                                    Text(shareStatus, color = primaryLight, fontSize = 11.sp)
+                                }
                             }
                         }
                     }
